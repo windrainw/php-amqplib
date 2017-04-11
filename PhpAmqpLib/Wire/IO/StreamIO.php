@@ -18,11 +18,14 @@ class StreamIO extends AbstractIO
     /** @var int */
     protected $port;
 
-    /** @var float */
+    /** @var int */
     protected $connection_timeout;
 
-    /** @var float */
+    /** @var int */
     protected $read_write_timeout;
+
+    /** @var int 毫秒*/
+    protected $whole_read_write_timeout;
 
     /** @var resource */
     protected $context;
@@ -54,11 +57,12 @@ class StreamIO extends AbstractIO
     /**
      * @param string $host
      * @param int $port
-     * @param float $connection_timeout
-     * @param float $read_write_timeout
+     * @param int $connection_timeout
+     * @param int $read_write_timeout
      * @param null $context
      * @param bool $keepalive
      * @param int $heartbeat
+     * @param int $whole_read_write_timeout 读写总超时
      */
     public function __construct(
         $host,
@@ -69,15 +73,12 @@ class StreamIO extends AbstractIO
         $keepalive = false,
         $heartbeat = 0
     ) {
-        if ($heartbeat !== 0 && ($read_write_timeout < ($heartbeat * 2))) {
-            throw new \InvalidArgumentException('read_write_timeout must be at least 2x the heartbeat');
-        }
-
         $this->protocol = 'tcp';
         $this->host = $host;
         $this->port = $port;
         $this->connection_timeout = $connection_timeout;
         $this->read_write_timeout = $read_write_timeout;
+        $this->whole_read_write_timeout = 100;
         $this->context = $context;
         $this->keepalive = $keepalive;
         $this->heartbeat = $heartbeat;
@@ -133,7 +134,7 @@ class StreamIO extends AbstractIO
                 STREAM_CLIENT_CONNECT,
                 $this->context
             );
-        } catch (\ErrorException $e) {
+        } catch (\Exception $e) {
             restore_error_handler();
             throw $e;
         }
@@ -191,7 +192,7 @@ class StreamIO extends AbstractIO
     }
 
     /**
-     * @param int $len
+     * @param $len
      * @throws \PhpAmqpLib\Exception\AMQPIOException
      * @return mixed|string
      */
@@ -200,7 +201,14 @@ class StreamIO extends AbstractIO
         $read = 0;
         $data = '';
 
+        $start = microtime(TRUE); 
+        $blockSelected = FALSE;
         while ($read < $len) {
+            $spendTime = (microtime(TRUE) - $start) * 1000;
+            if($spendTime > $this->whole_read_write_timeout){
+                throw new AMQPTimeoutException('read data time out for whole_read_write_timeout, used:' . $spendTime);
+            }
+
             $this->check_heartbeat();
 
             if (!is_resource($this->sock) || feof($this->sock)) {
@@ -208,12 +216,7 @@ class StreamIO extends AbstractIO
             }
 
             set_error_handler(array($this, 'error_handler'));
-            try {
-                $buffer = fread($this->sock, ($len - $read));
-            } catch (\ErrorException $e) {
-                restore_error_handler();
-                throw $e;
-            }
+            $buffer = fread($this->sock, ($len - $read));
             restore_error_handler();
 
             if ($buffer === false) {
@@ -224,8 +227,62 @@ class StreamIO extends AbstractIO
                 if ($this->canDispatchPcntlSignal) {
                     // prevent cpu from being consumed while waiting
                     if ($this->canSelectNull) {
-                        $this->select(null, null);
+                        $selectTimeoutSeconds = 10;
+                        $startSelectTime = microtime(TRUE);
+                        $selectResult = $this->select($selectTimeoutSeconds, null);
+                        $endSelectTime = microtime(TRUE);
+                        $selectSpendTime = $endSelectTime - $startSelectTime;
+                        if($selectSpendTime > ($selectTimeoutSeconds - 2)){
+                            $scriptName = $_SERVER['argv']['0'];
+                            if(preg_match(";(write_like_to_cache|write_like_to_db|market_activity);", $scriptName)){
+                                $backtrace = debug_backtrace();
+                                $traceArray = $this->generateTrace($backtrace);
+                                $pid = posix_getpid();
+                                $lsofInfo = shell_exec("lsof -p $pid | grep -P \"\d+u\"");
+                                $metaData = stream_get_meta_data($this->sock);
+                                $log = array(
+                                    'type'              => 'direct_select',
+                                    'scriptName'        => $scriptName,
+                                    'logTime'           => date("Y-m-d H:i:s"),
+                                    'startSelectTime'   => date("Y-m-d H:i:s", $startSelectTime),
+                                    'endSelectTime'     => date("Y-m-d H:i:s", $endSelectTime),
+                                    'pid'               => $pid,
+                                    'traceInfo'         => $traceArray,
+                                    'lsofInfo'          => $lsofInfo,
+                                    'metaData'          => $metaData,
+                                );
+                                $logInfo = json_encode($log, JSON_UNESCAPED_UNICODE);
+                                error_log($logInfo.PHP_EOL, 3, "/home/nice/coolly/var/logs/mq_select_trace.log-" . date("Y-m-d"));
+                                $blockSelected = TRUE;
+                            }
+                        }
+
                         pcntl_signal_dispatch();
+
+                        if($blockSelected){
+                           $backtrace = debug_backtrace();
+                           $traceArray = $this->generateTrace($backtrace);
+                           $pid = posix_getpid();
+                           $lsofInfo = shell_exec("lsof -p $pid | grep -P \"\d+u\"");
+                           $metaData = stream_get_meta_data($this->sock);
+                           $log = array(
+                               'type'              => 'after_signal',
+                               'scriptName'        => $scriptName,
+                               'logTime'           => date("Y-m-d H:i:s"),
+                               'startSelectTime'   => date("Y-m-d H:i:s", $startSelectTime),
+                               'endSelectTime'     => date("Y-m-d H:i:s", $endSelectTime),
+                               'pid'               => $pid,
+                               'traceInfo'         => $traceArray,
+                               'lsofInfo'          => $lsofInfo,
+                               'metaData'          => $metaData,
+                           );
+                           $logInfo = json_encode($log, JSON_UNESCAPED_UNICODE);
+ 
+                            error_log($logInfo.PHP_EOL, 3, "/home/nice/coolly/var/logs/mq_select_trace.log-" . date("Y-m-d"));
+                        }
+                        if(intval($selectResult) <= 0){
+                            throw new AMQPIOException('select timeout, used:' . $selectSpendTime);
+                        }
                     } else {
                         usleep(100000);
                         pcntl_signal_dispatch();
@@ -252,8 +309,55 @@ class StreamIO extends AbstractIO
         return $data;
     }
 
+    public function generateTrace($backtrace){
+        $traceArray = array();
+        $context      = $backtrace;
+        $maxDepth     = count($context);
+        $currentDepth = min(max(0, $depth), $maxDepth);
+        $parentDepth  = min($depth + 1, $maxDepth);
+        
+        for ($i = $parentDepth; $i < $maxDepth; $i ++) {
+            if (!isset($context[$i])) {
+                break;
+            }
+            $file = isset($context[$i]['file']) ? $context[$i]['file'] : '';
+            $line = isset($context[$i]['line']) ? $context[$i]['line'] : '';
+            $class = isset($context[$i]['class']) ? $context[$i]['class'] : '';
+            $type = isset($context[$i]['type']) ? $context[$i]['type'] : '';
+            $function = isset($context[$i]['function']) ? $context[$i]['function'] : '';
+            $args = '';
+            if (is_array($context[$i]['args']) && !empty($context[$i]['args'])) {
+                $argsArr = array();
+                foreach ($context[$i]['args'] as $key => $arg) {
+                    if ($arg instanceof Exception) { //读取Exception中的trace信息
+                        $exception_trace = $arg->getTrace();
+                        if (is_array($exception_trace) && !empty($exception_trace)) {
+                            foreach ($exception_trace as $trace) {
+                                array_push($context, $trace);
+                                $maxDepth ++;
+                            }
+                        }
+                    } else if (is_object($arg)) {
+                        $argsArr[$key] = 'object';
+                    } else if (is_array($arg)) {
+                        $argsArr[$key] = 'array';
+                    } else {
+                        if (strlen($arg) > 5000) {
+                            $arg = substr($arg, 0, 5000);
+                        }
+                        $argsArr[$key] = strval($arg);
+                    }
+                }
+                $args = "('" . implode("','", $argsArr) . "')";
+            }
+            
+            $traceArray[] =  $file . ':' . $line . ' ' . $class . $type . $function . $args;
+        }
+        return $traceArray;
+    }
+
     /**
-     * @param string $data
+     * @param $data
      * @return mixed|void
      * @throws \PhpAmqpLib\Exception\AMQPRuntimeException
      * @throws \PhpAmqpLib\Exception\AMQPTimeoutException
@@ -262,8 +366,12 @@ class StreamIO extends AbstractIO
     {
         $written = 0;
         $len = mb_strlen($data, 'ASCII');
-
+        $start = microtime(TRUE); 
         while ($written < $len) {
+            $spendTime = (microtime(TRUE) - $start) * 1000;
+            if($spendTime > $this->whole_read_write_timeout){
+                throw new AMQPRuntimeException('write data time out for whole_read_write_timeout, used:' . $spendTime);
+            }
 
             if (!is_resource($this->sock)) {
                 throw new AMQPRuntimeException('Broken pipe or closed connection');
@@ -277,12 +385,7 @@ class StreamIO extends AbstractIO
             // This behavior has been observed in OpenSSL dating back to at least
             // September 2002:
             // http://comments.gmane.org/gmane.comp.encryption.openssl.user/4361
-            try {
-                $buffer = fwrite($this->sock, mb_substr($data, $written, 8192, 'ASCII'), 8192);
-            } catch (\ErrorException $e) {
-                restore_error_handler();
-                throw $e;
-            }
+            $buffer = fwrite($this->sock, $data, 8192);
             restore_error_handler();
 
             if ($buffer === false) {
@@ -298,6 +401,10 @@ class StreamIO extends AbstractIO
             }
 
             $written += $buffer;
+
+            if ($buffer > 0) {
+                $data = mb_substr($data, $buffer, mb_strlen($data, 'ASCII') - $buffer, 'ASCII');
+            }
         }
 
         $this->last_write = microtime(true);
@@ -329,6 +436,8 @@ class StreamIO extends AbstractIO
              // it's allowed while processing signals
             return null;
         }
+
+        restore_error_handler();
 
         // raise all other issues to exceptions
         throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
@@ -395,8 +504,8 @@ class StreamIO extends AbstractIO
     }
 
     /**
-     * @param int $sec
-     * @param int $usec
+     * @param $sec
+     * @param $usec
      * @return int|mixed
      */
     public function select($sec, $usec)
@@ -407,12 +516,7 @@ class StreamIO extends AbstractIO
         $result = false;
 
         set_error_handler(array($this, 'error_handler'));
-        try {
-            $result = stream_select($read, $write, $except, $sec, $usec);
-        } catch (\ErrorException $e) {
-            restore_error_handler();
-            throw $e;
-        }
+        $result = stream_select($read, $write, $except, $sec, $usec);
         restore_error_handler();
 
         return $result;
