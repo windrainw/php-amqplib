@@ -1,5 +1,6 @@
 {
     "name": "windrainw/php-amqplib",
+    "version": "2.6.3-dev",
     "replace": {
         "videlalvaro/php-amqplib": "self.version"
     },
