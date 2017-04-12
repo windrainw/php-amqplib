@@ -1,11 +1,9 @@
 {
     "name": "windrainw/php-amqplib",
-    "version": "2.6.3-dev",
     "type": "library",
     "description": "Formerly videlalvaro/php-amqplib.  This library is a pure PHP implementation of the AMQP protocol. It's been tested against RabbitMQ.",
     "keywords": ["rabbitmq", "message", "queue"],
     "homepage": "https://github.com/php-amqplib/php-amqplib/",
-    "minimum-stability": "dev",
     "authors": [
         {
             "name": "Alvaro Videla",
