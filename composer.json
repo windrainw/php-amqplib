@@ -1,5 +1,5 @@
 {
-    "name": "windrainw/php-amqplib",
+    "name": "arch/php-amqplib",
     "type": "library",
     "description": "Formerly videlalvaro/php-amqplib.  This library is a pure PHP implementation of the AMQP protocol. It's been tested against RabbitMQ.",
     "keywords": ["rabbitmq", "message", "queue"],
