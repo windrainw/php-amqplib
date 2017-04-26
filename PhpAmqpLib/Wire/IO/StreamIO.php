@@ -232,54 +232,8 @@ class StreamIO extends AbstractIO
                         $selectResult = $this->select($selectTimeoutSeconds, null);
                         $endSelectTime = microtime(TRUE);
                         $selectSpendTime = $endSelectTime - $startSelectTime;
-                        if($selectSpendTime > ($selectTimeoutSeconds - 2)){
-                            $scriptName = $_SERVER['argv']['0'];
-                            if(preg_match(";(write_like_to_cache|write_like_to_db|market_activity);", $scriptName)){
-                                $backtrace = debug_backtrace();
-                                $traceArray = $this->generateTrace($backtrace);
-                                $pid = posix_getpid();
-                                $lsofInfo = shell_exec("lsof -p $pid | grep -P \"\d+u\"");
-                                $metaData = stream_get_meta_data($this->sock);
-                                $log = array(
-                                    'type'              => 'direct_select',
-                                    'scriptName'        => $scriptName,
-                                    'logTime'           => date("Y-m-d H:i:s"),
-                                    'startSelectTime'   => date("Y-m-d H:i:s", $startSelectTime),
-                                    'endSelectTime'     => date("Y-m-d H:i:s", $endSelectTime),
-                                    'pid'               => $pid,
-                                    'traceInfo'         => $traceArray,
-                                    'lsofInfo'          => $lsofInfo,
-                                    'metaData'          => $metaData,
-                                );
-                                $logInfo = json_encode($log, JSON_UNESCAPED_UNICODE);
-                                error_log($logInfo.PHP_EOL, 3, "/home/nice/coolly/var/logs/mq_select_trace.log-" . date("Y-m-d"));
-                                $blockSelected = TRUE;
-                            }
-                        }
 
                         pcntl_signal_dispatch();
-
-                        if($blockSelected){
-                           $backtrace = debug_backtrace();
-                           $traceArray = $this->generateTrace($backtrace);
-                           $pid = posix_getpid();
-                           $lsofInfo = shell_exec("lsof -p $pid | grep -P \"\d+u\"");
-                           $metaData = stream_get_meta_data($this->sock);
-                           $log = array(
-                               'type'              => 'after_signal',
-                               'scriptName'        => $scriptName,
-                               'logTime'           => date("Y-m-d H:i:s"),
-                               'startSelectTime'   => date("Y-m-d H:i:s", $startSelectTime),
-                               'endSelectTime'     => date("Y-m-d H:i:s", $endSelectTime),
-                               'pid'               => $pid,
-                               'traceInfo'         => $traceArray,
-                               'lsofInfo'          => $lsofInfo,
-                               'metaData'          => $metaData,
-                           );
-                           $logInfo = json_encode($log, JSON_UNESCAPED_UNICODE);
- 
-                            error_log($logInfo.PHP_EOL, 3, "/home/nice/coolly/var/logs/mq_select_trace.log-" . date("Y-m-d"));
-                        }
                         if(intval($selectResult) <= 0){
                             throw new AMQPIOException('select timeout, used:' . $selectSpendTime);
                         }
